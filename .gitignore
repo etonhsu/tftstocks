@@ -8,6 +8,13 @@ out-tsc
 # dependencies
 node_modules
 
+#env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
 # IDEs and editors
 /.idea
 .project
@@ -40,3 +47,9 @@ Thumbs.db
 
 .nx/cache
 .nx/workspace-data
+
+test-output
+
+vite.config.*.timestamp*
+vitest.config.*.timestamp*
+/generated/prisma
