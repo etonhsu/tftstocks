@@ -1,14 +1,300 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+// ─── AUTH & USERS ───────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  displayName   String
+  avatarUrl     String?
+  balance       Decimal   @default(10000) @db.Decimal(12, 2)
+
+  oauthAccounts OAuthAccount[]
+  holdings      Holding[]
+  transactions  Transaction[]
+  leagues       LeagueMember[]
+  watchlist     Watchlist[]
+  portfolioHistory PortfolioSnapshot[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model OAuthAccount {
+  id                String    @id @default(cuid())
+  provider          String    // "google" | "discord"
+  providerAccountId String
+  // Store profile data from provider for display
+  providerDisplayName String?
+  providerAvatarUrl   String?
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime  @default(now())
+
+  @@unique([provider, providerAccountId])
+}
+
+// ─── STOCKS (was Player) ────────────────────────────────────
+
+model Stock {
+  id            String    @id @default(cuid())
+
+  // Riot identity
+  puuid         String    @unique            // stable across name changes
+  summonerId    String    @unique            // carried over from v1
+  gameName      String                       // was game_name
+  gameNameLower String                       // for case-insensitive search
+  tagLine       String                       // e.g., "NA1"
+  region        String    @default("NA")
+
+  // Current Riot data (updated every 5 min)
+  rank          String                       // "CHALLENGER" | "GRANDMASTER" | "MASTER"
+  lp            Int
+  winRate       Decimal   @db.Decimal(5, 4)  // e.g., 0.5825
+  gamesPlayed   Int       @default(0)
+
+  // Streak tracking
+  streakType    String    @default("NONE")   // "WIN" | "LOSE" | "NONE"
+  streakLength  Int       @default(0)
+  streakLastGame DateTime?
+  streakBonus   Decimal   @default(0) @db.Decimal(6, 2) // cached, decays daily
+
+  // Pricing (computed, cached for fast reads)
+  currentPrice      Decimal  @db.Decimal(10, 2)
+  fundamentalValue  Decimal  @db.Decimal(10, 2)
+  marketSentiment   Decimal  @default(0) @db.Decimal(5, 4)
+  emaLP             Decimal  @db.Decimal(10, 2)
+
+  // Price deltas (carried from v1 — useful for stock list views)
+  delta8h       Decimal?  @db.Decimal(10, 2)
+  delta24h      Decimal?  @db.Decimal(10, 2)
+  delta72h      Decimal?  @db.Decimal(10, 2)
+
+  // Season transition
+  preResetFV    Decimal?  @db.Decimal(10, 2)
+  seasonResetAt DateTime?
+
+  // Delisting (carried from v1 — player drops out of top 750)
+  delistDate    DateTime?
+
+  // Relations
+  priceHistory  PriceSnapshot[]
+  holdings      Holding[]
+  transactions  Transaction[]
+  demandEvents  DemandEvent[]
+  watchedBy     Watchlist[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([gameNameLower])
+  @@index([rank, currentPrice])
+}
+
+// ─── PRICE HISTORY (was PlayerData) ─────────────────────────
+
+model PriceSnapshot {
+  id            String    @id @default(cuid())
+
+  stockId       String
+  stock         Stock     @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  // Full pricing breakdown at this point in time
+  price             Decimal  @db.Decimal(10, 2)
+  fundamentalValue  Decimal  @db.Decimal(10, 2)
+  marketSentiment   Decimal  @db.Decimal(5, 4)
+  lp                Int
+  rank              String
+
+  // Tiered retention: RAW (5min) → HOURLY → DAILY
+  granularity   String    @default("RAW")
+
+  recordedAt    DateTime  @default(now())
+
+  @@index([stockId, recordedAt])
+  @@index([stockId, granularity, recordedAt])
+}
+
+// ─── HOLDINGS (was PortfolioPlayer + PortfolioHold) ─────────
+
+model Holding {
+  id            String    @id @default(cuid())
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stockId       String
+  stock         Stock     @relation(fields: [stockId], references: [id])
+
+  shares        Decimal   @db.Decimal(10, 2)
+  avgBuyPrice   Decimal   @db.Decimal(10, 2)  // was purchase_price
+
+  // Anti-abuse hold (was PortfolioHold as separate table)
+  holdDeadline  DateTime?                      // can't sell until this time
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, stockId])
+}
+
+// ─── TRANSACTIONS ───────────────────────────────────────────
+
+model Transaction {
+  id            String    @id @default(cuid())
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+
+  stockId       String
+  stock         Stock     @relation(fields: [stockId], references: [id])
+
+  type          String                        // "BUY" | "SELL"
+  shares        Decimal   @db.Decimal(10, 2)
+  pricePerShare Decimal   @db.Decimal(10, 2)  // was just "price"
+  totalAmount   Decimal   @db.Decimal(12, 2)  // shares × price (new, avoids recomputing)
+
+  createdAt     DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([stockId, createdAt])
+}
+
+// ─── MARKET DEMAND (new) ────────────────────────────────────
+
+model DemandEvent {
+  id            String    @id @default(cuid())
+
+  stockId       String
+  stock         Stock     @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  netShares     Decimal   @db.Decimal(10, 2)  // positive = buy, negative = sell
+
+  createdAt     DateTime  @default(now())
+
+  @@index([stockId, createdAt])
+}
+
+// ─── LEAGUES (simplified) ───────────────────────────────────
+
+model League {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+  inviteCode    String    @unique @default(cuid())
+  type          String    @default("PRIVATE") // "PRIVATE" | "PUBLIC" | "GLOBAL" (carried from v1)
+
+  createdById   String
+
+  startDate     DateTime
+  endDate       DateTime
+  maxMembers    Int?                          // was max_players
+
+  members       LeagueMember[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model LeagueMember {
+  id            String    @id @default(cuid())
+
+  leagueId      String
+  league        League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Snapshot at join time — league ranking = current portfolio % gain from this baseline
+  portfolioValueAtJoin Decimal @db.Decimal(12, 2)
+
+  joinedAt      DateTime  @default(now())
+
+  @@unique([leagueId, userId])
+}
+
+// ─── WATCHLIST (was Favorite) ───────────────────────────────
+
+model Watchlist {
+  id            String    @id @default(cuid())
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stockId       String
+  stock         Stock     @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime  @default(now())
+
+  @@unique([userId, stockId])
+}
+
+// ─── PORTFOLIO VALUE HISTORY (was PortfolioHistory) ─────────
+
+model PortfolioSnapshot {
+  id            String    @id @default(cuid())
+
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  totalValue    Decimal   @db.Decimal(12, 2)  // holdings + cash
+  holdingsValue Decimal   @db.Decimal(12, 2)
+  cashBalance   Decimal   @db.Decimal(12, 2)
+
+  granularity   String    @default("RAW")
+
+  recordedAt    DateTime  @default(now())
+
+  @@index([userId, recordedAt])
+  @@index([userId, granularity, recordedAt])
+}
+
+// ─── SYSTEM CONFIG (new) ────────────────────────────────────
+
+model PricingConfig {
+  id            String    @id @default("default")
+
+  // EMA
+  emaAlpha              Decimal @default(0.3) @db.Decimal(4, 2)
+
+  // Rank base values
+  challengerBase        Decimal @default(80) @db.Decimal(6, 2)
+  grandmasterBase       Decimal @default(50) @db.Decimal(6, 2)
+  masterBase            Decimal @default(25) @db.Decimal(6, 2)
+
+  // LP scalars
+  challengerLPScalar    Decimal @default(0.15) @db.Decimal(4, 2)
+  grandmasterLPScalar   Decimal @default(0.10) @db.Decimal(4, 2)
+  masterLPScalar        Decimal @default(0.05) @db.Decimal(4, 2)
+
+  // Win rate
+  winRateMultiplier     Decimal @default(0.5) @db.Decimal(4, 2)
+  winRateWindow         Int     @default(30)
+
+  // Streaks
+  streakValue           Decimal @default(0.50) @db.Decimal(4, 2)
+  streakCap             Decimal @default(5.00) @db.Decimal(6, 2)
+  streakDecayPerDay     Decimal @default(0.50) @db.Decimal(4, 2)
+
+  // Market sentiment
+  sentimentK            Decimal @default(0.10) @db.Decimal(4, 2)
+  sentimentS            Decimal @default(100) @db.Decimal(8, 2)
+  sentimentClamp        Decimal @default(0.25) @db.Decimal(4, 2)
+  demandWindowDays      Int     @default(7)
+
+  // Season transition
+  seasonTransitionTau   Int     @default(7)
+
+  updatedAt             DateTime @updatedAt
 }
