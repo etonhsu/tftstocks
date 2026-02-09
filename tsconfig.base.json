@@ -16,6 +16,11 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "es2022",
-    "customConditions": ["@tftstocks/source"]
+    "customConditions": ["@tftstocks/source"],
+    "paths": {
+      "@tftstocks/database": ["libs/database/src/index.ts"],
+      "@tftstocks/utils": ["libs/utils/src/index.ts"],
+      "@tftstocks/shared-types": ["libs/shared-types/src/index.ts"]
+    }
   }
 }
